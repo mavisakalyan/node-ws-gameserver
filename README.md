@@ -32,6 +32,27 @@ npm run build
 npm start
 ```
 
+## Local Demo (2 tabs)
+
+This repo includes a tiny browser demo at `examples/browser-demo.html` that lets you connect two tabs and see `relay` messages in real time.
+
+1. Start the server:
+
+```bash
+npm run dev
+```
+
+2. Serve the demo page (any static server works):
+
+```bash
+cd examples
+python3 -m http.server 3000
+```
+
+3. Open `http://localhost:3000/browser-demo.html` in two tabs.
+4. Click **Connect** in both tabs (defaults to `ws://localhost:8080/ws/lobby`).
+5. Type a message and click **Send** — the other tab will receive a `relay`.
+
 ## Docker
 
 ```bash
@@ -55,7 +76,7 @@ docker run -p 8080:8080 node-ws-gameserver
 
 ## Protocol
 
-Both `node-ws-gameserver` and [`bun-ws-gameserver`](https://github.com/mavisakalyan/bun-ws-gameserver) use the same **msgpack binary relay protocol**, so clients are backend-agnostic.
+`node-ws-gameserver`, [`bun-ws-gameserver`](https://github.com/mavisakalyan/bun-ws-gameserver), and [`cloudflare-ws-gameserver`](https://github.com/mavisakalyan/cloudflare-ws-gameserver) use the same **msgpack binary relay protocol**, so clients are backend-agnostic.
 
 The server is **protocol-agnostic** — it manages rooms and connections, but treats game data as opaque payloads. Any client that speaks msgpack can use it: multiplayer games, collaborative tools, IoT dashboards, chat apps, etc.
 
@@ -168,6 +189,16 @@ Click the deploy button at the top, or go to [app.alternatefutures.ai](https://a
 docker build --platform linux/amd64 -t node-ws-gameserver .
 docker run -p 8080:8080 -e PORT=8080 node-ws-gameserver
 ```
+
+## Sibling Repos
+
+| Repo | Runtime | Deploy Target |
+|------|---------|---------------|
+| **node-ws-gameserver** | Node.js 20 + `ws` | Docker, Railway, DePIN, any host |
+| [`bun-ws-gameserver`](https://github.com/mavisakalyan/bun-ws-gameserver) | Bun native WS | Docker, Railway, DePIN, any host |
+| [`cloudflare-ws-gameserver`](https://github.com/mavisakalyan/cloudflare-ws-gameserver) | Cloudflare Workers + DO | Cloudflare edge (global) |
+
+All three implement the same msgpack relay protocol. Clients connect to any of them by changing the server URL.
 
 ## License
 
