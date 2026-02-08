@@ -4,7 +4,7 @@ Production-grade WebSocket game server built with Node.js, TypeScript, and msgpa
 
 [![Deploy on Alternate Futures](https://app.alternatefutures.ai/badge/deploy.svg)](https://app.alternatefutures.ai/deploy/node-ws-gameserver)
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/YOUR_TEMPLATE_ID?referralCode=YOUR_CODE)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/x6i4kh?referralCode=vwwMnH)
 
 ## Features
 
