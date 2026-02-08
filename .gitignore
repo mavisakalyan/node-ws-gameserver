@@ -1,0 +1,14 @@
+# dependencies
+node_modules/
+package-lock.json
+
+# build output
+dist/
+
+# environment
+.env
+.env.local
+
+# misc
+.DS_Store
+*.tsbuildinfo
