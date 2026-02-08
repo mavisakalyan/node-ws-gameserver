@@ -10,7 +10,6 @@ import { handleHealthRequest } from './health.js';
 
 const PORT = Number(process.env.PORT) || 8080;
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map(s => s.trim());
-const SNAPSHOT_HZ = Number(process.env.SNAPSHOT_HZ) || 20;
 const KEEPALIVE_MS = Number(process.env.KEEPALIVE_MS) || 30000;
 const MAX_MESSAGES_PER_SECOND = Number(process.env.MAX_MESSAGES_PER_SECOND) || 60;
 const MAX_PLAYERS_PER_ROOM = Number(process.env.MAX_PLAYERS_PER_ROOM) || 50;
@@ -20,13 +19,13 @@ const MAX_PLAYERS_PER_ROOM = Number(process.env.MAX_PLAYERS_PER_ROOM) || 50;
 const rooms = new Map<string, Room>();
 const rateLimiter = new RateLimiter(MAX_MESSAGES_PER_SECOND);
 
-/** Maps WebSocket → { clientId, roomId, joined } */
-const clientMeta = new WeakMap<WebSocket, { clientId: string; roomId: string; joined: boolean }>();
+/** Maps WebSocket → { clientId, roomId } */
+const clientMeta = new WeakMap<WebSocket, { clientId: string; roomId: string }>();
 
 function getOrCreateRoom(roomId: string): Room {
   let room = rooms.get(roomId);
   if (!room) {
-    room = new Room(roomId, MAX_PLAYERS_PER_ROOM, SNAPSHOT_HZ);
+    room = new Room(roomId, MAX_PLAYERS_PER_ROOM);
     rooms.set(roomId, room);
   }
   return room;
@@ -73,7 +72,7 @@ server.on('upgrade', (req, socket, head) => {
   const clientId = randomUUID();
 
   wss.handleUpgrade(req, socket, head, (ws) => {
-    clientMeta.set(ws, { clientId, roomId, joined: false });
+    clientMeta.set(ws, { clientId, roomId });
     wss.emit('connection', ws, req);
   });
 });
@@ -86,6 +85,14 @@ wss.on('connection', (ws: WebSocket) => {
   }
 
   const { clientId, roomId } = meta;
+
+  // ─── Auto-join room on connect ──────────────────────────
+  const room = getOrCreateRoom(roomId);
+  const joined = room.join(clientId, ws);
+  if (!joined) {
+    ws.close(1013, 'Room full');
+    return;
+  }
 
   // ─── KeepAlive ────────────────────────────────────────────
   let isAlive = true;
@@ -101,71 +108,51 @@ wss.on('connection', (ws: WebSocket) => {
   }, KEEPALIVE_MS);
 
   // ─── Message Handler ──────────────────────────────────────
-  ws.on('message', (data: Buffer) => {
+  ws.on('message', (raw: Buffer) => {
     // Rate limiting
     if (!rateLimiter.allow(clientId)) {
-      const msg = encodeMessage({
+      ws.send(encodeMessage({
         type: 'error',
-        payload: { code: ErrorCodes.RATE_LIMITED, message: 'Rate limited' },
-      });
-      ws.send(msg);
+        code: ErrorCodes.RATE_LIMITED,
+        message: 'Rate limited',
+      }));
       return;
     }
 
-    const message = decodeMessage(data);
+    const message = decodeMessage(raw);
     if (!message) {
-      const msg = encodeMessage({
+      ws.send(encodeMessage({
         type: 'error',
-        payload: { code: ErrorCodes.INVALID_MESSAGE, message: 'Invalid message format' },
-      });
-      ws.send(msg);
+        code: ErrorCodes.INVALID_MESSAGE,
+        message: 'Invalid message format',
+      }));
       return;
     }
 
-    const room = getOrCreateRoom(roomId);
-
-    switch (message.type) {
-      case 'join': {
-        if (meta.joined) break; // Already joined
-        const displayName = (message.payload.displayName || 'Anonymous').slice(0, 32);
-        const success = room.join(clientId, ws, displayName);
-        if (success) {
-          meta.joined = true;
-        }
-        break;
-      }
-
-      case 'state': {
-        if (!meta.joined) {
-          const msg = encodeMessage({
-            type: 'error',
-            payload: { code: ErrorCodes.NOT_JOINED, message: 'Send a "join" message first' },
-          });
-          ws.send(msg);
-          break;
-        }
-        room.updatePlayerState(clientId, message.payload);
-        break;
-      }
-
-      case 'chat': {
-        if (!meta.joined) break;
-        room.chat(clientId, message.payload.message);
-        break;
-      }
+    // Handle ping
+    if (message.type === 'ping' && typeof message.nonce === 'string') {
+      ws.send(encodeMessage({
+        type: 'pong',
+        nonce: message.nonce,
+        serverTime: Date.now(),
+      }));
+      return;
     }
+
+    // Everything else is game data — relay to peers
+    room.relay(clientId, message);
   });
 
   // ─── Disconnect ───────────────────────────────────────────
   ws.on('close', () => {
     clearInterval(pingInterval);
     rateLimiter.remove(clientId);
-    const room = rooms.get(roomId);
-    if (room) {
-      room.leave(clientId);
+    const r = rooms.get(roomId);
+    if (r) {
+      r.leave(clientId);
       // Clean up empty rooms (except lobby)
-      if (room.playerCount === 0 && roomId !== 'lobby') {
-        room.destroy();
+      if (r.playerCount === 0 && roomId !== 'lobby') {
+        r.destroy();
         rooms.delete(roomId);
       }
     }
@@ -175,6 +162,14 @@ wss.on('connection', (ws: WebSocket) => {
     console.error(`[ws] Client ${clientId} error:`, err.message);
   });
 });
+
+// ─── Periodic metrics update ─────────────────────────────────────
+
+setInterval(() => {
+  for (const room of rooms.values()) {
+    room.updateMetrics();
+  }
+}, 1000);
 
 // ─── Rate limiter cleanup ────────────────────────────────────────
 
@@ -189,5 +184,5 @@ server.listen(PORT, () => {
   console.log(`[node-ws-gameserver] WebSocket endpoint: ws://localhost:${PORT}/ws/:roomId`);
   console.log(`[node-ws-gameserver] Health: http://localhost:${PORT}/health`);
   console.log(`[node-ws-gameserver] Metrics: http://localhost:${PORT}/metrics`);
-  console.log(`[node-ws-gameserver] Config: ${SNAPSHOT_HZ}Hz tick, ${MAX_PLAYERS_PER_ROOM} max/room, ${MAX_MESSAGES_PER_SECOND} msg/s limit`);
+  console.log(`[node-ws-gameserver] Config: ${MAX_PLAYERS_PER_ROOM} max/room, ${MAX_MESSAGES_PER_SECOND} msg/s limit`);
 });

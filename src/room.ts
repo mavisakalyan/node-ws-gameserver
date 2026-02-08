@@ -1,165 +1,138 @@
 import { WebSocket } from 'ws';
-import { encodeMessage, type PlayerState, type ServerMessage, ErrorCodes } from './protocol.js';
+import { encodeMessage, type ServerMessage, ErrorCodes } from './protocol.js';
 
-export interface Player {
+export interface Peer {
   id: string;
   ws: WebSocket;
-  displayName: string;
-  state: PlayerState;
   joinedAt: number;
 }
 
 export class Room {
   readonly id: string;
-  private players: Map<string, Player> = new Map();
-  private tickInterval: ReturnType<typeof setInterval> | null = null;
+  private peers: Map<string, Peer> = new Map();
   private readonly maxPlayers: number;
-  private readonly snapshotHz: number;
 
   // Metrics
   private messageCount = 0;
   private lastMessageCountReset = Date.now();
   messagesPerSecond = 0;
 
-  constructor(id: string, maxPlayers: number, snapshotHz: number) {
+  constructor(id: string, maxPlayers: number) {
     this.id = id;
     this.maxPlayers = maxPlayers;
-    this.snapshotHz = snapshotHz;
   }
 
   get playerCount(): number {
-    return this.players.size;
+    return this.peers.size;
   }
 
   get isFull(): boolean {
-    return this.players.size >= this.maxPlayers;
+    return this.peers.size >= this.maxPlayers;
   }
 
-  get isRunning(): boolean {
-    return this.tickInterval !== null;
-  }
-
-  /** Add a player to the room. Returns false if room is full. */
-  join(id: string, ws: WebSocket, displayName: string): boolean {
+  /**
+   * Add a peer to the room. Auto-called on WebSocket open.
+   * Returns false if room is full.
+   */
+  join(id: string, ws: WebSocket): boolean {
     if (this.isFull) {
       const msg = encodeMessage({
         type: 'error',
-        payload: { code: ErrorCodes.ROOM_FULL, message: `Room "${this.id}" is full (${this.maxPlayers} players)` },
+        code: ErrorCodes.ROOM_FULL,
+        message: `Room "${this.id}" is full (${this.maxPlayers} peers)`,
       });
       ws.send(msg);
       return false;
     }
 
-    const player: Player = {
+    // Collect existing peer IDs before adding the new one
+    const existingPeerIds: string[] = [];
+    for (const peer of this.peers.values()) {
+      existingPeerIds.push(peer.id);
+    }
+
+    const peer: Peer = {
       id,
       ws,
-      displayName,
-      state: {
-        position: { x: 0, y: 0, z: 0 },
-        rotation: { x: 0, y: 0, z: 0, w: 1 },
-        action: 'idle',
-      },
       joinedAt: Date.now(),
     };
 
-    this.players.set(id, player);
+    this.peers.set(id, peer);
 
-    // Notify existing players
+    // Send welcome to the new peer with list of existing peers
+    this.send(ws, {
+      type: 'welcome',
+      playerId: id,
+      peers: existingPeerIds,
+    });
+
+    // Notify existing peers
     this.broadcast({
-      type: 'player_joined',
-      payload: { id, displayName },
+      type: 'peer_joined',
+      peerId: id,
     }, id);
-
-    // Start tick loop if this is the first player
-    if (this.players.size === 1 && !this.tickInterval) {
-      this.startTickLoop();
-    }
 
     return true;
   }
 
-  /** Remove a player from the room */
+  /**
+   * Remove a peer from the room.
+   */
   leave(id: string): void {
-    const player = this.players.get(id);
-    if (!player) return;
+    const peer = this.peers.get(id);
+    if (!peer) return;
 
-    this.players.delete(id);
+    this.peers.delete(id);
 
-    // Notify remaining players
+    // Notify remaining peers
     this.broadcast({
-      type: 'player_left',
-      payload: { id },
+      type: 'peer_left',
+      peerId: id,
     });
-
-    // Stop tick loop if room is empty
-    if (this.players.size === 0) {
-      this.stopTickLoop();
-    }
   }
 
-  /** Update a player's state */
-  updatePlayerState(id: string, state: PlayerState): void {
-    const player = this.players.get(id);
-    if (!player) return;
-    player.state = { ...state, timestamp: Date.now() };
+  /**
+   * Relay a client message to all other peers in the room.
+   * The original message is wrapped in a `relay` envelope.
+   */
+  relay(fromId: string, data: unknown): void {
+    const peer = this.peers.get(fromId);
+    if (!peer) return;
+
+    this.broadcast({
+      type: 'relay',
+      from: fromId,
+      data,
+    }, fromId);
+
     this.messageCount++;
   }
 
-  /** Broadcast a chat message from a player */
-  chat(id: string, message: string): void {
-    const player = this.players.get(id);
-    if (!player) return;
-    this.broadcast({
-      type: 'chat',
-      payload: { id, message: message.slice(0, 500) }, // Limit chat message length
-    });
-    this.messageCount++;
+  /** Check if a peer exists in this room */
+  hasPeer(id: string): boolean {
+    return this.peers.has(id);
   }
 
-  /** Check if a player exists in this room */
-  hasPlayer(id: string): boolean {
-    return this.players.has(id);
-  }
-
-  /** Start the server-authoritative tick loop */
-  private startTickLoop(): void {
-    const intervalMs = 1000 / this.snapshotHz;
-    this.tickInterval = setInterval(() => {
-      this.tick();
-    }, intervalMs);
-  }
-
-  /** Stop the tick loop */
-  private stopTickLoop(): void {
-    if (this.tickInterval) {
-      clearInterval(this.tickInterval);
-      this.tickInterval = null;
+  /** Send a message to a single WebSocket */
+  private send(ws: WebSocket, msg: ServerMessage): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(encodeMessage(msg));
     }
   }
 
-  /** Single tick: broadcast snapshot of all player states */
-  private tick(): void {
-    if (this.players.size === 0) return;
-
-    const players: Record<string, PlayerState & { displayName: string }> = {};
-    for (const [id, player] of this.players) {
-      players[id] = {
-        ...player.state,
-        displayName: player.displayName,
-      };
+  /** Broadcast a message to all peers (optionally excluding one) */
+  private broadcast(msg: ServerMessage, excludeId?: string): void {
+    const data = encodeMessage(msg);
+    for (const [id, peer] of this.peers) {
+      if (id === excludeId) continue;
+      if (peer.ws.readyState === WebSocket.OPEN) {
+        peer.ws.send(data);
+      }
     }
+  }
 
-    const snapshot: ServerMessage = {
-      type: 'snapshot',
-      payload: {
-        players,
-        timestamp: Date.now(),
-      },
-    };
-
-    this.broadcast(snapshot);
-
-    // Update messages/sec metric
+  /** Update messages/sec metric (call periodically) */
+  updateMetrics(): void {
     const now = Date.now();
     const elapsed = now - this.lastMessageCountReset;
     if (elapsed >= 1000) {
@@ -169,23 +142,11 @@ export class Room {
     }
   }
 
-  /** Send a message to all players (optionally excluding one) */
-  private broadcast(msg: ServerMessage, excludeId?: string): void {
-    const data = encodeMessage(msg);
-    for (const [id, player] of this.players) {
-      if (id === excludeId) continue;
-      if (player.ws.readyState === WebSocket.OPEN) {
-        player.ws.send(data);
-      }
-    }
-  }
-
   /** Clean up the room */
   destroy(): void {
-    this.stopTickLoop();
-    for (const player of this.players.values()) {
-      player.ws.close(1001, 'Room destroyed');
+    for (const peer of this.peers.values()) {
+      peer.ws.close(1001, 'Room destroyed');
     }
-    this.players.clear();
+    this.peers.clear();
   }
 }
