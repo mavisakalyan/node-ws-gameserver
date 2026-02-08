@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { encodeMessage, type ServerMessage, ErrorCodes } from './protocol.js';
+import { encodeMessage, PROTOCOL_VERSION, type ServerMessage, ErrorCodes } from './protocol.js';
 
 export interface Peer {
   id: string;
@@ -62,6 +62,7 @@ export class Room {
     // Send welcome to the new peer with list of existing peers
     this.send(ws, {
       type: 'welcome',
+      protocolVersion: PROTOCOL_VERSION,
       playerId: id,
       peers: existingPeerIds,
     });

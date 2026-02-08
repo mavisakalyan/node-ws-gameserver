@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
-import { decodeMessage, encodeMessage, ErrorCodes } from './protocol.js';
+import { decodeMessage, encodeMessage, ErrorCodes, PROTOCOL_VERSION } from './protocol.js';
 import { Room } from './room.js';
 import { RateLimiter } from './rate-limit.js';
 import { handleHealthRequest } from './health.js';
@@ -127,6 +127,20 @@ wss.on('connection', (ws: WebSocket) => {
         message: 'Invalid message format',
       }));
       return;
+    }
+
+    // Handle hello (optional protocol version check)
+    if (message.type === 'hello') {
+      const clientVersion = message.protocolVersion;
+      if (typeof clientVersion === 'number' && clientVersion !== PROTOCOL_VERSION) {
+        ws.send(encodeMessage({
+          type: 'error',
+          code: ErrorCodes.BAD_PROTOCOL,
+          message: `Protocol mismatch. Server=${PROTOCOL_VERSION}, Client=${clientVersion}`,
+        }));
+        ws.close(1008, 'BAD_PROTOCOL');
+      }
+      return; // hello is consumed, not relayed
     }
 
     // Handle ping
