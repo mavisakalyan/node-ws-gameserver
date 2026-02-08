@@ -132,7 +132,7 @@ Click the deploy button at the top, or go to [app.alternatefutures.ai](https://a
 
 ```bash
 docker build --platform linux/amd64 -t node-ws-gameserver .
-docker run -p 8080:8080 -e PORT=8080 node-ws-gameserver
+docker run -p 8080:8080 -e PORT=8080 node-ws-gameserver 
 ```
 
 ## License
