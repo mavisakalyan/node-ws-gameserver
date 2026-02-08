@@ -4,7 +4,7 @@ Protocol-agnostic WebSocket relay server built with Node.js, TypeScript, and msg
 
 [![Deploy on Alternate Futures](https://app.alternatefutures.ai/badge/deploy.svg)](https://app.alternatefutures.ai/deploy/node-ws-gameserver)
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/template/x6i4kh?referralCode=vwwMnH)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/github?repo=mavisakalyan/node-ws-gameserver)
 
 ## Features
 
@@ -179,8 +179,8 @@ Click the deploy button at the top, or go to [app.alternatefutures.ai](https://a
 
 ### Railway
 
-1. Fork this repo
-2. Connect to Railway
+1. Click the "Deploy on Railway" button above (GitHub import)
+2. Connect your GitHub account if prompted
 3. Deploy — Railway reads `railway.toml` automatically
 
 ### Docker (any host)
