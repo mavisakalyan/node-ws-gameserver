@@ -4,7 +4,7 @@ Protocol-agnostic WebSocket relay server built with Node.js, TypeScript, and msg
 
 [![Deploy on Alternate Futures](https://app.alternatefutures.ai/badge/deploy.svg)](https://app.alternatefutures.ai/deploy/node-ws-gameserver)
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new/github?repo=mavisakalyan/node-ws-gameserver)
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/nodejs-websocket-game-server)
 
 ## Features
 
