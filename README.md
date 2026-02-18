@@ -202,4 +202,4 @@ All three implement the same msgpack relay protocol. Clients connect to any of t
 
 ## License
 
-MIT
+GPL-3.0-only
