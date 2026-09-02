@@ -95,7 +95,15 @@
       const HOST = qs.get("host") || "node-ws-gameserver-production-5ce2.up.railway.app";
       const ROOM = (qs.get("room") || "lobby").replace(/[^a-zA-Z0-9_-]/g, "") || "lobby";
       const secure = !/^(localhost|127\.|0\.0\.0\.0)/.test(HOST);
-      const WS_URL = `${secure ? "wss" : "ws"}://${HOST}/ws/${ROOM}`;
+
+      // Rooms cap out (50 players by default); spill into lobby-2, lobby-3, ...
+      let roomIndex = 0;
+      function currentRoom() {
+        return roomIndex === 0 ? ROOM : `${ROOM}-${roomIndex + 1}`;
+      }
+      function wsUrl() {
+        return `${secure ? "wss" : "ws"}://${HOST}/ws/${currentRoom()}`;
+      }
 
       const SEND_INTERVAL_MS = 50;   // 20 pos updates/s max, server allows 60 msg/s
       const PING_INTERVAL_MS = 5000;
@@ -156,12 +164,13 @@
 
       function connect() {
         setStatus("connecting");
-        ws = new WebSocket(WS_URL);
+        ws = new WebSocket(wsUrl());
         ws.binaryType = "arraybuffer";
 
         ws.onopen = () => {
           reconnectDelay = 1000;
           setStatus("connected", "ok");
+          roomEl.textContent = `room: ${currentRoom()}`;
           send({ type: "hello", protocolVersion: 1 });
         };
 
@@ -228,12 +237,19 @@
           }
         };
 
-        ws.onclose = () => {
-          setStatus("reconnecting", "bad");
+        ws.onclose = (ev) => {
           latencyEl.textContent = "rtt: -";
           myId = null;
           peers.clear();
           updateCount();
+          if (ev.code === 1013 && roomIndex < 20) {
+            // room full: spill into the next room immediately
+            roomIndex++;
+            setStatus("room full, moving", "bad");
+            setTimeout(connect, 250);
+            return;
+          }
+          setStatus("reconnecting", "bad");
           setTimeout(connect, reconnectDelay);
           reconnectDelay = Math.min(reconnectDelay * 2, 10000);
         };
