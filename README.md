@@ -6,6 +6,8 @@ Protocol-agnostic WebSocket relay server built with Node.js, TypeScript, and msg
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/nodejs-websocket-game-server)
 
+**[Live demo](https://mavisakalyan.github.io/node-ws-gameserver/)** · every visitor shares one room: move your cursor, click for a ping, open it on a second device and watch it sync.
+
 ## Features
 
 - **Room-based architecture** — `/ws/:roomId` with auto-created rooms and configurable player caps
