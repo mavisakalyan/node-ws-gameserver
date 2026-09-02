@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>node-ws-gameserver · live demo</title>
+    <meta name="description" content="Live multiplayer demo of node-ws-gameserver, a stateless WebSocket relay with rooms, msgpack, and rate limiting." />
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        background: #0b0f18;
+        color: #e6e6e6;
+        overflow: hidden;
+      }
+      header {
+        position: fixed;
+        top: 0; left: 0; right: 0;
+        z-index: 10;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+        padding: 10px 14px;
+        background: rgba(11, 15, 24, 0.82);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid #1f2a44;
+      }
+      header strong { letter-spacing: 0.2px; }
+      .pill {
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid #2a3a63;
+        background: #0f1729;
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .pill.ok { border-color: #2f6e4f; color: #8ee6b0; }
+      .pill.bad { border-color: #7a3644; color: #ff9db0; }
+      .hint { font-size: 12px; opacity: 0.75; }
+      .spacer { flex: 1; }
+      nav { display: flex; gap: 10px; align-items: center; }
+      nav a { color: #9fb6ff; font-size: 13px; text-decoration: none; }
+      nav a:hover { text-decoration: underline; }
+      nav img { display: block; height: 28px; }
+      canvas { position: fixed; inset: 0; display: block; touch-action: none; cursor: crosshair; }
+      footer {
+        position: fixed;
+        bottom: 10px; left: 0; right: 0;
+        z-index: 10;
+        text-align: center;
+        font-size: 12px;
+        opacity: 0.7;
+        pointer-events: none;
+      }
+      footer a { color: #9fb6ff; pointer-events: auto; }
+      @media (max-width: 640px) {
+        .hint { display: none; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>node-ws-gameserver</strong>
+      <span class="pill" id="status">connecting</span>
+      <span class="pill" id="players">1 online</span>
+      <span class="pill" id="latency">rtt: -</span>
+      <span class="pill" id="roomPill">room: -</span>
+      <span class="hint">Move your mouse. Click or tap for a ping. Open this page on another device and watch it sync.</span>
+      <span class="spacer"></span>
+      <nav>
+        <a href="https://github.com/mavisakalyan/node-ws-gameserver" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://railway.com/deploy/nodejs-websocket-game-server" target="_blank" rel="noopener" title="Deploy your own relay on Railway">
+          <img src="https://railway.com/button.svg" alt="Deploy on Railway" />
+        </a>
+      </nav>
+    </header>
+
+    <canvas id="c"></canvas>
+
+    <footer>
+      Every visitor on this page shares one room through a stateless msgpack relay.
+      <a href="https://github.com/mavisakalyan/node-ws-gameserver" target="_blank" rel="noopener">Read the source</a>
+      or deploy your own in one click.
+    </footer>
+
+    <script type="module">
+      import { encode, decode } from "https://esm.sh/@msgpack/msgpack@3.1.3";
+
+      // ── Config ──────────────────────────────────────────────────
+      const qs = new URLSearchParams(location.search);
+      const HOST = qs.get("host") || "node-ws-gameserver-production-5ce2.up.railway.app";
+      const ROOM = (qs.get("room") || "lobby").replace(/[^a-zA-Z0-9_-]/g, "") || "lobby";
+      const secure = !/^(localhost|127\.|0\.0\.0\.0)/.test(HOST);
+      const WS_URL = `${secure ? "wss" : "ws"}://${HOST}/ws/${ROOM}`;
+
+      const SEND_INTERVAL_MS = 50;   // 20 pos updates/s max, server allows 60 msg/s
+      const PING_INTERVAL_MS = 5000;
+
+      // ── Identity derived from player id (same on every client) ──
+      const ADJ = ["brave","calm","fuzzy","swift","lucky","noble","witty","sunny","mellow","spry","bold","quiet","zesty","merry","keen","dapper","plucky","cosmic","tidal","ember"];
+      const ANIMAL = ["otter","fox","lynx","heron","panda","gecko","orca","finch","badger","tapir","crane","mole","raven","koala","bison","newt","ibis","yak","stoat","quail"];
+
+      function hash(str) {
+        let h = 2166136261;
+        for (let i = 0; i < str.length; i++) {
+          h ^= str.charCodeAt(i);
+          h = Math.imul(h, 16777619);
+        }
+        return h >>> 0;
+      }
+      function nameOf(id) {
+        const h = hash(id);
+        return `${ADJ[h % ADJ.length]}-${ANIMAL[(h >>> 5) % ANIMAL.length]}`;
+      }
+      function colorOf(id) {
+        return `hsl(${hash(id) % 360} 75% 65%)`;
+      }
+
+      // ── DOM ─────────────────────────────────────────────────────
+      const $ = (id) => document.getElementById(id);
+      const statusEl = $("status");
+      const playersEl = $("players");
+      const latencyEl = $("latency");
+      const roomEl = $("roomPill");
+      roomEl.textContent = `room: ${ROOM}`;
+
+      // ── State ───────────────────────────────────────────────────
+      let ws = null;
+      let myId = null;
+      let reconnectDelay = 1000;
+
+      // peers: id -> { x, y, tx, ty, hasPos }
+      const peers = new Map();
+      const ripples = []; // { x, y, t0, color }
+
+      const me = { x: 0.5, y: 0.5 };
+      let moved = false;
+
+      function setStatus(text, cls) {
+        statusEl.textContent = text;
+        statusEl.className = "pill" + (cls ? " " + cls : "");
+      }
+      function updateCount() {
+        const n = peers.size + (myId ? 1 : 0);
+        playersEl.textContent = `${Math.max(n, 1)} online`;
+      }
+
+      // ── WebSocket ───────────────────────────────────────────────
+      function send(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(encode(obj));
+      }
+
+      function connect() {
+        setStatus("connecting");
+        ws = new WebSocket(WS_URL);
+        ws.binaryType = "arraybuffer";
+
+        ws.onopen = () => {
+          reconnectDelay = 1000;
+          setStatus("connected", "ok");
+          send({ type: "hello", protocolVersion: 1 });
+        };
+
+        ws.onmessage = (event) => {
+          const msg = decode(new Uint8Array(event.data));
+          if (!msg || typeof msg !== "object") return;
+
+          switch (msg.type) {
+            case "welcome": {
+              myId = msg.playerId;
+              for (const id of msg.peers || []) {
+                if (!peers.has(id)) peers.set(id, { x: 0.5, y: 0.5, tx: 0.5, ty: 0.5, hasPos: false });
+              }
+              updateCount();
+              send({ type: "pos", x: me.x, y: me.y });
+              break;
+            }
+            case "peer_joined": {
+              peers.set(msg.peerId, { x: 0.5, y: 0.5, tx: 0.5, ty: 0.5, hasPos: false });
+              updateCount();
+              // let the newcomer see us without waiting for our next move
+              send({ type: "pos", x: me.x, y: me.y });
+              break;
+            }
+            case "peer_left": {
+              peers.delete(msg.peerId);
+              updateCount();
+              break;
+            }
+            case "relay": {
+              const d = msg.data;
+              if (!d || typeof d !== "object") return;
+              let p = peers.get(msg.from);
+              if (!p) {
+                p = { x: 0.5, y: 0.5, tx: 0.5, ty: 0.5, hasPos: false };
+                peers.set(msg.from, p);
+                updateCount();
+              }
+              if (d.type === "pos" || d.type === "click") {
+                if (typeof d.x === "number" && typeof d.y === "number") {
+                  if (!p.hasPos) { p.x = d.x; p.y = d.y; }
+                  p.tx = d.x;
+                  p.ty = d.y;
+                  p.hasPos = true;
+                }
+              }
+              if (d.type === "click" && typeof d.x === "number" && typeof d.y === "number") {
+                ripples.push({ x: d.x, y: d.y, t0: performance.now(), color: colorOf(msg.from) });
+              }
+              break;
+            }
+            case "pong": {
+              const sent = pingSentAt.get(msg.nonce);
+              if (sent) {
+                latencyEl.textContent = `rtt: ${Math.max(1, Math.round(performance.now() - sent))} ms`;
+                pingSentAt.delete(msg.nonce);
+              }
+              break;
+            }
+            case "error": {
+              if (msg.code === "ROOM_FULL") setStatus("room full", "bad");
+              break;
+            }
+          }
+        };
+
+        ws.onclose = () => {
+          setStatus("reconnecting", "bad");
+          latencyEl.textContent = "rtt: -";
+          myId = null;
+          peers.clear();
+          updateCount();
+          setTimeout(connect, reconnectDelay);
+          reconnectDelay = Math.min(reconnectDelay * 2, 10000);
+        };
+
+        ws.onerror = () => { /* onclose handles retry */ };
+      }
+
+      // ── Outgoing position (throttled) ───────────────────────────
+      setInterval(() => {
+        if (moved) {
+          moved = false;
+          send({ type: "pos", x: me.x, y: me.y });
+        }
+      }, SEND_INTERVAL_MS);
+
+      // ── Latency ping ────────────────────────────────────────────
+      const pingSentAt = new Map();
+      setInterval(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const nonce = `n_${Math.random().toString(16).slice(2)}`;
+        pingSentAt.set(nonce, performance.now());
+        send({ type: "ping", nonce });
+        // drop stale entries
+        if (pingSentAt.size > 8) pingSentAt.clear();
+      }, PING_INTERVAL_MS);
+
+      // ── Input ───────────────────────────────────────────────────
+      const canvas = $("c");
+      const ctx = canvas.getContext("2d");
+
+      function toNorm(clientX, clientY) {
+        return { x: clientX / innerWidth, y: clientY / innerHeight };
+      }
+      function onMove(clientX, clientY) {
+        const p = toNorm(clientX, clientY);
+        me.x = p.x; me.y = p.y;
+        moved = true;
+      }
+      addEventListener("mousemove", (e) => onMove(e.clientX, e.clientY));
+      addEventListener("touchmove", (e) => {
+        const t = e.touches[0];
+        if (t) onMove(t.clientX, t.clientY);
+      }, { passive: true });
+
+      function onClick(clientX, clientY) {
+        const p = toNorm(clientX, clientY);
+        me.x = p.x; me.y = p.y;
+        ripples.push({ x: p.x, y: p.y, t0: performance.now(), color: myId ? colorOf(myId) : "#9fb6ff" });
+        send({ type: "click", x: p.x, y: p.y });
+      }
+      canvas.addEventListener("mousedown", (e) => onClick(e.clientX, e.clientY));
+      canvas.addEventListener("touchstart", (e) => {
+        const t = e.touches[0];
+        if (t) onClick(t.clientX, t.clientY);
+      }, { passive: true });
+
+      // ── Render ──────────────────────────────────────────────────
+      function resize() {
+        const dpr = Math.min(devicePixelRatio || 1, 2);
+        canvas.width = Math.floor(innerWidth * dpr);
+        canvas.height = Math.floor(innerHeight * dpr);
+        canvas.style.width = innerWidth + "px";
+        canvas.style.height = innerHeight + "px";
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+      addEventListener("resize", resize);
+      resize();
+
+      function drawCursor(nx, ny, id, isMe) {
+        const x = nx * innerWidth;
+        const y = ny * innerHeight;
+        const color = id ? colorOf(id) : "#9fb6ff";
+
+        ctx.beginPath();
+        ctx.arc(x, y, isMe ? 7 : 6, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        if (isMe) {
+          ctx.beginPath();
+          ctx.arc(x, y, 11, 0, Math.PI * 2);
+          ctx.strokeStyle = color;
+          ctx.globalAlpha = 0.5;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        const label = id ? (isMe ? `${nameOf(id)} (you)` : nameOf(id)) : "connecting";
+        ctx.font = "12px system-ui, sans-serif";
+        const w = ctx.measureText(label).width;
+        ctx.fillStyle = "rgba(11, 15, 24, 0.8)";
+        ctx.fillRect(x + 12, y - 9, w + 10, 18);
+        ctx.fillStyle = color;
+        ctx.fillText(label, x + 17, y + 4);
+      }
+
+      function frame(now) {
+        ctx.clearRect(0, 0, innerWidth, innerHeight);
+
+        // grid
+        ctx.strokeStyle = "rgba(42, 58, 99, 0.25)";
+        ctx.lineWidth = 1;
+        const step = 48;
+        for (let gx = 0; gx < innerWidth; gx += step) {
+          ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, innerHeight); ctx.stroke();
+        }
+        for (let gy = 0; gy < innerHeight; gy += step) {
+          ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(innerWidth, gy); ctx.stroke();
+        }
+
+        // ripples (700 ms life)
+        for (let i = ripples.length - 1; i >= 0; i--) {
+          const r = ripples[i];
+          const t = (now - r.t0) / 700;
+          if (t >= 1) { ripples.splice(i, 1); continue; }
+          ctx.beginPath();
+          ctx.arc(r.x * innerWidth, r.y * innerHeight, 8 + t * 52, 0, Math.PI * 2);
+          ctx.strokeStyle = r.color;
+          ctx.globalAlpha = 1 - t;
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          ctx.lineWidth = 1;
+        }
+
+        // peers (lerp toward target)
+        for (const [id, p] of peers) {
+          if (!p.hasPos) continue;
+          p.x += (p.tx - p.x) * 0.25;
+          p.y += (p.ty - p.y) * 0.25;
+          drawCursor(p.x, p.y, id, false);
+        }
+
+        // me
+        drawCursor(me.x, me.y, myId, true);
+
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+
+      connect();
+    </script>
+  </body>
+</html>
